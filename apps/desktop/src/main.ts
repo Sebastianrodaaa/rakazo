@@ -1311,6 +1311,8 @@ app.whenReady().then(async () => {
   });
 
   if (target.kind === "setup") {
+    // First run: bring up the local Docker stack right away; the setup window attaches and opens the app when ready.
+    if (process.env.RAKAZO_FORCE_SETUP !== "1") void localStack.start();
     showSetupWindow();
   } else if (target.source === "saved") {
     if (currentSetup?.mode === "new") {
