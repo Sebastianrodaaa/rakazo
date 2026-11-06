@@ -2,8 +2,12 @@ import { spawnSync } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
 import { resolveSupervisorToken } from "@rakazo/core";
+import type Docker from "dockerode";
 import { describe, expect, it } from "vitest";
+import { computerNetworkNameFor } from "./computer-spec.js";
 import {
+  connectEgressPeer,
+  ensureBotNetwork,
   MAX_SUPERVISOR_FILE_REQUEST_BYTES,
   MAX_SUPERVISOR_REQUEST_BYTES,
   resolveDockerSocketPath,
@@ -823,5 +827,94 @@ describe("docker exec stream demux", () => {
       stdout: padded.toString("utf8"),
       stderr: "",
     });
+  });
+});
+
+describe("bot network egress policy", () => {
+  it("creates an internal network when internal is set", async () => {
+    const created: Array<Record<string, unknown>> = [];
+    const client = {
+      createNetwork: async (options: Record<string, unknown>) => {
+        created.push(options);
+        return {};
+      },
+    } as unknown as Docker;
+    await ensureBotNetwork("bot_isolated", true, client);
+    expect(created).toEqual([
+      {
+        Name: computerNetworkNameFor("bot_isolated"),
+        Driver: "bridge",
+        CheckDuplicate: true,
+        Internal: true,
+      },
+    ]);
+  });
+
+  it("creates an open network only when internal is unset", async () => {
+    const created: Array<Record<string, unknown>> = [];
+    const client = {
+      createNetwork: async (options: Record<string, unknown>) => {
+        created.push(options);
+        return {};
+      },
+    } as unknown as Docker;
+    await ensureBotNetwork("bot_open", false, client);
+    expect(created[0]).toMatchObject({ Internal: false });
+  });
+
+  const supervisorInfo = {
+    Config: { Labels: { "com.docker.compose.project": "rakazo" } },
+  } as unknown as Docker.ContainerInspectInfo;
+
+  it("fails provisioning when the egress peer is missing", async () => {
+    const client = {
+      listContainers: async () => [],
+    } as unknown as Docker;
+    await expect(connectEgressPeer("rakazo-computer-x", supervisorInfo, client)).rejects.toThrow(
+      /egress proxy/,
+    );
+  });
+
+  it("fails closed when the supervisor has no compose project", async () => {
+    const client = {
+      listContainers: async () => {
+        throw new Error("must not list without a project");
+      },
+    } as unknown as Docker;
+    await expect(connectEgressPeer("rakazo-computer-x", undefined, client)).rejects.toThrow(
+      /egress proxy/,
+    );
+  });
+
+  it("connects the egress container to the bot network under the stable alias", async () => {
+    const connects: Array<Record<string, unknown>> = [];
+    const client = {
+      listContainers: async () => [{ Id: "egress-1" }],
+      getNetwork: () => ({
+        inspect: async () => ({ Containers: {} }),
+        connect: async (options: Record<string, unknown>) => {
+          connects.push(options);
+        },
+      }),
+    } as unknown as Docker;
+    await connectEgressPeer("rakazo-computer-x", supervisorInfo, client);
+    expect(connects).toEqual([
+      { Container: "egress-1", EndpointConfig: { Aliases: ["rakazo-egress"] } },
+    ]);
+  });
+
+  it("skips reconnecting an already attached egress peer", async () => {
+    const client = {
+      listContainers: async () => [{ Id: "egress-1" }],
+      getNetwork: () => ({
+        inspect: async () => ({ Containers: { "egress-1": {} } }),
+        connect: async () => {
+          throw new Error("must not reconnect");
+        },
+      }),
+    } as unknown as Docker;
+    await expect(
+      connectEgressPeer("rakazo-computer-x", supervisorInfo, client),
+    ).resolves.toBeUndefined();
   });
 });

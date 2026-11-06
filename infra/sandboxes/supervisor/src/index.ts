@@ -31,6 +31,7 @@ import {
   containerCreateOptions,
   containerNameFor,
   controlPortPublicationMatches,
+  EGRESS_PROXY_ALIAS,
   homeVolumeMatches,
   hostComputerUser,
   legacyNetworkOwnedSolelyBy,
@@ -235,11 +236,20 @@ app.post("/computers", async (c) => {
         await assertComputerHomeWritable(serviceHomePath, effectiveUid, effectiveGid);
         const name = containerNameFor(body.botId);
         const createdNetwork =
-          screenNetworkMode === "internal" ? undefined : await ensureBotNetwork(body.botId);
+          screenNetworkMode === "internal"
+            ? undefined
+            : await ensureBotNetwork(body.botId, screenNetworkMode === "isolated");
         let container: Docker.Container | undefined;
         try {
           if (existing) {
             await existing.remove({ force: true }).catch(() => undefined);
+          }
+          // On the isolated topology the bot network is internal: the only way
+          // out is the shared egress proxy, attached here under a stable alias.
+          // If it cannot be attached, provisioning fails rather than creating a
+          // computer with no egress or an open network.
+          if (screenNetworkMode === "isolated" && networkMode) {
+            await connectEgressPeer(networkMode, runtimeInfo);
           }
           container = await docker.createContainer(
             containerCreateOptions({
@@ -252,6 +262,7 @@ app.post("/computers", async (c) => {
               networkMode,
               controlToken: randomUUID(),
               publishControlPort: controlViaLoopback,
+              egressProxy: screenNetworkMode === "isolated",
             }),
           );
           await container.start();
@@ -797,6 +808,12 @@ function startSupervisor() {
   // and pass its healthcheck, then fail the first POST /computers with a 500 that reads like a
   // Docker problem. Failing here names the variable while the deployment is still coming up.
   computerResourceLimits();
+  if (screenNetworkMode !== "isolated") {
+    logger.warn(
+      "SANDBOX_SCREEN_NETWORK is not 'isolated'; bot computers have unrestricted network egress",
+      { "sandbox.screen_network": screenNetworkMode },
+    );
+  }
   const port = Number(process.env.SUPERVISOR_PORT ?? 7091);
   const hostname = process.env.SUPERVISOR_HOST ?? "127.0.0.1";
   const server = serve({ fetch: app.fetch, hostname, port }, () => {
@@ -1210,12 +1227,78 @@ async function connectComposeScreenPeers(networkName: string, info: Docker.Conta
         }),
       ),
   );
+  // The egress container can be recreated with a new ID, which drops its
+  // attachment and alias; repair it here too so existing computers keep
+  // egress without waiting for reprovisioning.
+  if (project) {
+    const egressContainers = await docker.listContainers({
+      all: true,
+      filters: {
+        label: [`com.docker.compose.project=${project}`, "com.docker.compose.service=egress"],
+      },
+    });
+    await connectPeerIdsWithAlias(
+      network,
+      egressContainers.map((container) => container.Id),
+    );
+  }
 }
 
-async function ensureBotNetwork(botId: string) {
+async function connectPeerIdsWithAlias(network: Docker.Network, containerIds: string[]) {
+  const networkInfo = await network.inspect();
+  const connectedIds = new Set(Object.keys(networkInfo.Containers ?? {}));
+  await Promise.all(
+    containerIds
+      .filter((containerId) => !connectedIds.has(containerId))
+      .map((containerId) =>
+        network
+          .connect({
+            Container: containerId,
+            EndpointConfig: { Aliases: [EGRESS_PROXY_ALIAS] },
+          })
+          .catch((error) => {
+            if (!/already exists|already connected/i.test(String(error))) throw error;
+          }),
+      ),
+  );
+}
+
+/**
+ * Attach the shared egress proxy to a bot's internal network under a stable
+ * alias, the same way connectComposeScreenPeers attaches the web peer. The
+ * proxy is located through the supervisor's Compose project; if it cannot be
+ * found the caller must fail provisioning rather than leave the computer
+ * without egress or fall back to an open network.
+ */
+export async function connectEgressPeer(
+  networkName: string,
+  info: Docker.ContainerInspectInfo | undefined,
+  client: Docker = docker,
+) {
+  const project = info?.Config.Labels?.["com.docker.compose.project"];
+  const peers = project
+    ? await client.listContainers({
+        all: true,
+        filters: {
+          label: [`com.docker.compose.project=${project}`, "com.docker.compose.service=egress"],
+        },
+      })
+    : [];
+  if (peers.length === 0) {
+    throw new Error(
+      "egress proxy container not found; refusing to provision a computer without controlled egress",
+    );
+  }
+  await connectPeerIdsWithAlias(
+    client.getNetwork(networkName),
+    peers.map((peer) => peer.Id),
+  );
+}
+
+export async function ensureBotNetwork(botId: string, internal: boolean, client: Docker = docker) {
   const name = computerNetworkNameFor(botId);
-  return docker
-    .createNetwork({ Name: name, Driver: "bridge", CheckDuplicate: true })
+  return client
+    .createNetwork({ Name: name, Driver: "bridge", CheckDuplicate: true, Internal: internal })
     .catch((error) => {
       // Existing networks and concurrent provision requests are both safe.
       if (!/already exists/i.test(String(error))) throw error;

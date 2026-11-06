@@ -48,6 +48,25 @@ services:
     volumes:
       - appdata:/data
 
+  # Forward proxy for bot computers: the only egress out of their internal
+  # per-bot networks, and it only dials globally routable addresses. Sits on
+  # its own egress network; the supervisor joins it to each bot network under
+  # the alias rakazo-egress. Never publish it on the host.
+  egress:
+    image: ${RAKAZO_IMAGE:-ghcr.io/elie222/rakazo/app}:${RAKAZO_IMAGE_TAG:-edge}
+    restart: unless-stopped
+    command: ["pnpm", "--filter", "@rakazo/sandbox-egress-proxy", "start"]
+    init: true
+    user: node
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
+    networks:
+      - egress
+
   # Runs from the app image. Not published as its own image and not exposed on the host:
   # access to the supervisor is equivalent to control of the Docker host.
   supervisor:
@@ -89,6 +108,8 @@ services:
         condition: service_completed_successfully
       data-init:
         condition: service_completed_successfully
+      egress:
+        condition: service_started
     healthcheck:
       test:
         - CMD
@@ -246,3 +267,6 @@ networks:
   app:
   data:
     internal: true
+  # Separate from app/data so the proxy cannot address the stack's services;
+  # it only needs outbound NAT plus the per-bot networks it joins on demand.
+  egress:

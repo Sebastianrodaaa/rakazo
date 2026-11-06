@@ -117,12 +117,41 @@ describe("graphical computer spec", () => {
       homePath: "/var/rakazo/homes/bot_isolation",
       networkMode,
     });
-    expect(networkMode).toMatch(/^rakazo-computer-bot_isolation-[0-9a-f]{32}$/);
+    expect(networkMode).toMatch(/^rakazo-computer-bot_isolation-[0-9a-f]{32}-egress$/);
     expect(options.HostConfig.NetworkMode).toBe(networkMode);
     expect(options.HostConfig.PortBindings["6080/tcp"]).toEqual([
       { HostIp: "127.0.0.1", HostPort: "0" },
     ]);
     expect(options.ExposedPorts["6080/tcp"]).toEqual({});
+  });
+
+  it("sets proxy env pointing at the egress alias when egressProxy is enabled", () => {
+    const options = containerCreateOptions({
+      name: containerNameFor("bot_egress"),
+      image: COMPUTER_IMAGE,
+      botId: "bot_egress",
+      spaceId: "ws",
+      homePath: "/var/rakazo/homes/bot_egress",
+      networkMode: computerNetworkNameFor("bot_egress"),
+      egressProxy: true,
+    });
+    expect(options.Env).toContain("HTTP_PROXY=http://rakazo-egress:3128");
+    expect(options.Env).toContain("HTTPS_PROXY=http://rakazo-egress:3128");
+    expect(options.Env).toContain("http_proxy=http://rakazo-egress:3128");
+    expect(options.Env).toContain("https_proxy=http://rakazo-egress:3128");
+    expect(options.Env).toContain("NO_PROXY=localhost,127.0.0.1");
+    expect(options.Env).toContain("no_proxy=localhost,127.0.0.1");
+  });
+
+  it("does not set proxy env when egressProxy is not enabled", () => {
+    const options = containerCreateOptions({
+      name: "rakazo-bot-abc",
+      image: COMPUTER_IMAGE,
+      botId: "abc",
+      spaceId: "ws",
+      homePath: "/var/rakazo/homes/abc",
+    });
+    expect(options.Env?.join("\n")).not.toMatch(/PROXY/i);
   });
 
   it("keeps sanitized network names unique when botIds only differ by stripped characters", () => {
@@ -134,8 +163,11 @@ describe("graphical computer spec", () => {
     const names = computerNetworkNamesForCleanup("bot_1");
     expect(names[0]).toBe(computerNetworkNameFor("bot_1"));
     expect(names).toContain("rakazo-computer-bot_1");
+    // The pre-egress hashed network name must be cleaned up too: containers
+    // from before internal-only egress still sit on open networks.
     expect(names.some((name) => /-[0-9a-f]{8}$/.test(name))).toBe(true);
     expect(names.some((name) => /-[0-9a-f]{32}$/.test(name))).toBe(true);
+    expect(names.some((name) => /-[0-9a-f]{32}-egress$/.test(name))).toBe(true);
   });
 
   it("skips legacy network removal when another bot is still attached", () => {

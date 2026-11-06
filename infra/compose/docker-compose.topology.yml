@@ -53,6 +53,8 @@ services:
         condition: service_completed_successfully
       computer-image:
         condition: service_completed_successfully
+      egress:
+        condition: service_started
     healthcheck:
       test:
         - CMD
@@ -62,6 +64,21 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
+
+  # Only egress out of the internal per-bot networks; dials public IPs only.
+  egress:
+    image: ${TOPOLOGY_APP_IMAGE:-rakazo/app:topology}
+    command: ["pnpm", "--filter", "@rakazo/sandbox-egress-proxy", "start"]
+    user: node
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      app-image:
+        condition: service_completed_successfully
+    networks:
+      - egress
 
   api:
     image: ${TOPOLOGY_APP_IMAGE:-rakazo/app:topology}
@@ -151,3 +168,6 @@ services:
 volumes:
   pgdata:
   appdata:
+
+networks:
+  egress:

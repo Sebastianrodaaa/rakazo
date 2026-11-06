@@ -225,6 +225,7 @@ export interface ComputerCreateInput {
   controlToken?: string;
   networkMode?: string;
   publishControlPort?: boolean;
+  egressProxy?: boolean;
 }
 
 interface PointerInput {
@@ -254,6 +255,7 @@ export function containerCreateOptions(input: ComputerCreateInput) {
       "NPM_CONFIG_PREFIX=/home/rakazo/.local",
       "PIP_USER=1",
       ...(input.controlToken ? [`RAKAZO_COMPUTER_CONTROL_TOKEN=${input.controlToken}`] : []),
+      ...(input.egressProxy ? egressProxyEnv() : []),
     ],
     Labels: {
       "rakazo.managed": "true",
@@ -305,8 +307,11 @@ export function computerNetworkNameFor(botId: string) {
   // Keep distinct botIds on distinct networks even when sanitization collapses
   // characters (e.g. "a/b" and "ab"). Do not change containerNameFor — that
   // name must stay stable so an existing computer can resume.
+  // The -egress suffix versions the network policy: containers created before
+  // internal-only egress existed sit on an open network whose name does not
+  // match, so they are replaced rather than silently keeping open egress.
   const hash = createHash("sha256").update(botId).digest("hex").slice(0, 32);
-  return `rakazo-computer-${sanitizeIdentifier(botId).slice(0, 32)}-${hash}`;
+  return `rakazo-computer-${sanitizeIdentifier(botId).slice(0, 32)}-${hash}-egress`;
 }
 
 /** Current and prior network names used by this PR, for delete cleanup. */
@@ -315,8 +320,29 @@ export function computerNetworkNamesForCleanup(botId: string) {
   const digest = createHash("sha256").update(botId).digest("hex");
   return [
     computerNetworkNameFor(botId),
+    `rakazo-computer-${safe.slice(0, 32)}-${digest.slice(0, 32)}`,
     `rakazo-computer-${safe}`,
     `rakazo-computer-${safe.slice(0, 32)}-${digest.slice(0, 8)}`,
+  ];
+}
+
+/**
+ * Alias the supervisor gives the shared egress proxy on each bot's internal
+ * network. Bot containers have no direct egress; HTTP(S) traffic reaches the
+ * internet through the proxy, which only dials globally routable addresses.
+ */
+export const EGRESS_PROXY_ALIAS = "rakazo-egress";
+export const EGRESS_PROXY_PORT = 3128;
+
+export function egressProxyEnv() {
+  const url = `http://${EGRESS_PROXY_ALIAS}:${EGRESS_PROXY_PORT}`;
+  return [
+    `HTTP_PROXY=${url}`,
+    `HTTPS_PROXY=${url}`,
+    `http_proxy=${url}`,
+    `https_proxy=${url}`,
+    "NO_PROXY=localhost,127.0.0.1",
+    "no_proxy=localhost,127.0.0.1",
   ];
 }
 

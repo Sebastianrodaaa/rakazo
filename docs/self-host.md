@@ -93,6 +93,8 @@ On Windows, if an older clone with `core.autocrlf=true` leaves the computer pane
 
 Compose runs Postgres, the sandbox supervisor (Docker socket), API, worker, and a Vite preview of the web app. Bot computers are sibling containers (`rakazo/computer:local`) on separate per-bot networks; only the supervisor and screen proxy join each one. The API process does not get an unrestricted Docker socket; the supervisor owns the lifecycle.
 
+Each bot network is internal-only: computers have no direct egress. HTTP(S) traffic leaves through the `egress` proxy, which only dials globally routable addresses, so computers cannot reach the host, `host.docker.internal`, the LAN, or sibling containers. Non-HTTP protocols that do not honour `HTTP(S)_PROXY`/`CONNECT` (raw SSH, arbitrary TCP) have no egress at all. Note the proxy allows any public destination, including your own public IP if you port-forward to services on the host (NAT hairpin).
+
 Postgres stays on the Compose network only (not published on the host), matching the images
 compose. Credentials come from `.env` (`POSTGRES_PASSWORD` is required). Prefer a URI-safe value
 (`openssl rand -hex 16`); characters such as `@ : / ? # %` break the interpolated `DATABASE_URL`

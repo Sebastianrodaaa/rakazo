@@ -1,5 +1,6 @@
 packages:
   - "apps/*"
   - "packages/*"
+  - "infra/sandboxes/egress-proxy"
   - "infra/sandboxes/supervisor"
   - "infra/updater"

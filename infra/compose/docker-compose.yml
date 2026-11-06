@@ -45,6 +45,23 @@ services:
     depends_on:
       computer:
         condition: service_completed_successfully
+      egress:
+        condition: service_started
+
+  # Only egress out of the internal per-bot networks; dials public IPs only.
+  # Runs from the app image (the supervisor image is supervisor-only).
+  egress:
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile
+    command: ["pnpm", "--filter", "@rakazo/sandbox-egress-proxy", "start"]
+    user: node
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - egress
 
   computer:
     image: rakazo/computer:local
@@ -145,3 +162,8 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  # Keep the proxy off the app networks; it needs only outbound NAT plus the
+  # per-bot networks the supervisor joins it to on demand.
+  egress:
